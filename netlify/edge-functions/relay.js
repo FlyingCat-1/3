@@ -1,16 +1,11 @@
-// Remember to change this to your actual Netlify domain (e.g. "my-app.netlify.app")
-const WORKER_URL = "https://6a082dbfa57cfe3427359834--ornate-meringue-6b68d5.netlify.app";
+// Change this to your exact Netlify domain so self-fetching is blocked
+const WORKER_URL = "https://6a082dbfa57cfe3427359834--ornate-meringue-6b68d5.netlify.app/"; 
 
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 25000;
 
-export default async (request, context) => {
-    // Map Netlify's environment variables to the 'env' object your code expects
-    const env = {
-        UPSTREAM_FORWARDER_URL: Netlify.env.get("UPSTREAM_FORWARDER_URL"),
-        UPSTREAM_FAIL_MODE: Netlify.env.get("UPSTREAM_FAIL_MODE"),
-        UPSTREAM_TIMEOUT_MS: Netlify.env.get("UPSTREAM_TIMEOUT_MS"),
-        UPSTREAM_AUTH_KEY: Netlify.env.get("UPSTREAM_AUTH_KEY")
-    };
+export default async (request) => {
+    // Netlify exposes environment variables natively on process.env
+    const env = process.env;
 
     try {
         const hop = request.headers.get("x-relay-hop");
