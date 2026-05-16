@@ -1,6 +1,17 @@
+// Remember to change this to your actual Netlify domain (e.g. "my-app.netlify.app")
+const WORKER_URL = "https://6a082dbfa57cfe3427359834--ornate-meringue-6b68d5.netlify.app";
+
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 25000;
 
 export default async (request, context) => {
+    // Map Netlify's environment variables to the 'env' object your code expects
+    const env = {
+        UPSTREAM_FORWARDER_URL: Netlify.env.get("UPSTREAM_FORWARDER_URL"),
+        UPSTREAM_FAIL_MODE: Netlify.env.get("UPSTREAM_FAIL_MODE"),
+        UPSTREAM_TIMEOUT_MS: Netlify.env.get("UPSTREAM_TIMEOUT_MS"),
+        UPSTREAM_AUTH_KEY: Netlify.env.get("UPSTREAM_AUTH_KEY")
+    };
+
     try {
         const hop = request.headers.get("x-relay-hop");
         const fwdHop = request.headers.get("x-fwd-hop");
@@ -23,31 +34,24 @@ export default async (request, context) => {
         }
 
         const targetUrl = new URL(req.u);
-        const requestUrl = new URL(request.url);
 
-        // Dynamically block requests to the current Netlify deployment URL
         const BLOCKED_HOSTS = [
-            requestUrl.hostname
+            WORKER_URL,
         ];
 
         if (BLOCKED_HOSTS.some(h => targetUrl.hostname.endsWith(h))) {
             return json({ e: "self-fetch blocked" }, 400);
         }
 
-        // Netlify exposes environment variables via Netlify.env
-        const env = {
-            UPSTREAM_FORWARDER_URL: Netlify.env.get("UPSTREAM_FORWARDER_URL") || "",
-            UPSTREAM_FAIL_MODE: Netlify.env.get("UPSTREAM_FAIL_MODE") || "closed",
-            UPSTREAM_TIMEOUT_MS: Netlify.env.get("UPSTREAM_TIMEOUT_MS") || "",
-            UPSTREAM_AUTH_KEY: Netlify.env.get("UPSTREAM_AUTH_KEY") || ""
-        };
+        const upstreamUrl = (env && env.UPSTREAM_FORWARDER_URL) || "";
 
-        const upstreamUrl = env.UPSTREAM_FORWARDER_URL;
+        // f === 1: forward; f === 0: skip; missing: legacy client → forward (compat).
         const wantForward = (req.f === 1) || (req.f === undefined);
 
         if (upstreamUrl && wantForward) {
-            const upstreamResp = await forwardViaUpstream(req, env, upstreamUrl, requestUrl.hostname);
+            const upstreamResp = await forwardViaUpstream(req, env, upstreamUrl);
             if (upstreamResp) return upstreamResp;
+            // fall through to direct fetch only when fail-mode is open
         }
 
         const headers = new Headers();
@@ -71,12 +75,12 @@ export default async (request, context) => {
 
         const resp = await fetch(targetUrl.toString(), fetchOptions);
 
-        // Standard web API array buffer handling (safe chunking to prevent stack overflow)
+        // Read response safely (no stack overflow)
         const buffer = await resp.arrayBuffer();
         const uint8 = new Uint8Array(buffer);
 
         let binary = "";
-        const chunkSize = 0x8000; 
+        const chunkSize = 0x8000; // prevent call stack overflow
 
         for (let i = 0; i < uint8.length; i += chunkSize) {
             binary += String.fromCharCode.apply(
@@ -103,10 +107,10 @@ export default async (request, context) => {
     }
 };
 
-async function forwardViaUpstream(req, env, upstreamUrl, currentHostname) {
-    const failMode = env.UPSTREAM_FAIL_MODE.toLowerCase();
+async function forwardViaUpstream(req, env, upstreamUrl) {
+    const failMode = (env.UPSTREAM_FAIL_MODE || "closed").toLowerCase();
     const timeoutMs = parseInt(env.UPSTREAM_TIMEOUT_MS, 10) || DEFAULT_UPSTREAM_TIMEOUT_MS;
-    const authKey = env.UPSTREAM_AUTH_KEY;
+    const authKey = env.UPSTREAM_AUTH_KEY || "";
 
     let parsed;
     try {
@@ -117,7 +121,7 @@ async function forwardViaUpstream(req, env, upstreamUrl, currentHostname) {
     if (parsed.protocol !== "https:") {
         return upstreamFailure("UPSTREAM_FORWARDER_URL must be https://", failMode);
     }
-    if (parsed.hostname.endsWith(currentHostname)) {
+    if (parsed.hostname.endsWith(WORKER_URL)) {
         return upstreamFailure("self-forward blocked", failMode);
     }
     if (!authKey) {
@@ -151,6 +155,7 @@ async function forwardViaUpstream(req, env, upstreamUrl, currentHostname) {
             return upstreamFailure("forwarder status " + resp.status, failMode);
         }
 
+        // Pass body straight through without parsing — saves CPU and memory.
         const body = await resp.text();
         return new Response(body, {
             status: 200,
@@ -166,7 +171,7 @@ async function forwardViaUpstream(req, env, upstreamUrl, currentHostname) {
 function upstreamFailure(reason, failMode) {
     if (failMode === "open") {
         console.warn("upstream forwarder failed (falling back to direct):", reason);
-        return null;
+        return null; // signals caller to fall through to direct fetch
     }
     return json({ e: "upstream forwarder failed: " + reason }, 502);
 }
